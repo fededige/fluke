@@ -31,7 +31,7 @@ class ClientSL(Client):
             train_set=train_set,
             test_set=test_set,
             optimizer_cfg=optimizer_cfg,
-            loss_fn=loss_fn,   # gestire quetsa loss_fn inutile (in vanillaSL)
+            loss_fn=loss_fn,   # gestire quetsa loss_fn inutile (in centralizedSL)
             local_epochs=local_epochs,
             fine_tuning_epochs=fine_tuning_epochs,
             clipping=clipping,
