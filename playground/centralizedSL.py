@@ -1,3 +1,4 @@
+import typing
 import uuid
 from typing import Sequence, Any
 
@@ -27,7 +28,7 @@ class CentralizedSL(CentralizedFL):
         server: ServerSL = None,
         **kwargs,
     ):
-        ObserverSubject.__init__(self, **kwargs) #non va molto bene
+        ObserverSubject.__init__(self, **kwargs)
         if (clients is not None and server is None) or (clients is None and server is not None):
             raise ValueError("Both clients and server must be provided or neither of them.")
 
@@ -144,7 +145,7 @@ class CentralizedSL(CentralizedFL):
                     self.notify(event="start_round", round=rnd + 1,
                                 global_model=torch.nn.Sequential(self.server.client_model, self.server.model))
 
-                    eligible = self.server.get_eligible_clients(eligible_perc)
+                    eligible = typing.cast(Sequence[ClientSL], self.server.get_eligible_clients(eligible_perc)) #eligible is still of type Sequence[Client] but the type checker knows that the return type is Sequence[ClientSL]
 
                     self.notify(event="selected_clients", round=rnd + 1, clients=eligible)
 
@@ -152,12 +153,10 @@ class CentralizedSL(CentralizedFL):
                         # passa al client il modello client-side corrente
                         self.server.send_client_model(client.index)
 
-                        forward = client.start_training(rnd + 1)
+                        local_update = client.start_round(rnd + 1)
                         for _ in range(self.hyper_params.client.local_epochs):
-                            for _ in forward:
+                            for _ in local_update:
                                 self.server.train_on_smashed_data(client.index)
-                                client.backward()
-                            client.end_epoch()
                             self.server.end_epoch()
 
                         client.end_round(rnd + 1)
