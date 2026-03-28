@@ -1,9 +1,11 @@
 import typing
-from typing import Sequence, Generator
+from copy import deepcopy
+from typing import Sequence, Generator, Any
 
 import torch
 
 from fluke import FlukeENV
+from fluke.evaluation import Evaluator
 from fluke.comm import Message
 from fluke.config import OptimizerConfigurator
 from fluke.data import FastDataLoader
@@ -14,7 +16,7 @@ from playground.centralizedSL import CentralizedSL
 from playground.clientSL import ClientSL
 from playground.serverSL import ServerSL
 
-class P2PCentralizedSL(CentralizedSL):
+class P2PSL(CentralizedSL):
     def get_client_class(self):
         return ClientP2PSL
 
@@ -42,13 +44,15 @@ class P2PCentralizedSL(CentralizedSL):
                     self.notify(event="selected_clients", round=rnd + 1, clients=eligible)
 
                     for c, client in enumerate(eligible):
-                        if c == 0 and rnd == 0:
-                            self.server.send_client_model(client.index) #in questo caso invia None invece che il modello
-                        else:
-                            self.server.send_last_client_trained_info(client.index)
-                            eligible[c - 1].send_model(client.index) #if c == 0 and rnd != 0 => eligible[0 - 1] == eligible[len(eligible) - 1]
+                        first_client_first_round = c == 0 and rnd == 0
+                        self.server.send_last_client_trained_info(client.index, first_client_first_round=first_client_first_round)
 
-                        local_update = client.start_round(rnd + 1, receive_from_server=(c == 0 and rnd == 0))
+                        if first_client_first_round:
+                            client.model = deepcopy(self.server.client_model)
+                        else:
+                            eligible[c - 1].send_model(client.index)
+
+                        local_update = client.start_round(rnd + 1)
                         for _ in range(self.hyper_params.client.local_epochs):
                             for _ in local_update:
                                 self.server.train_on_smashed_data(client.index)
@@ -84,10 +88,10 @@ class P2PCentralizedSL(CentralizedSL):
         self.notify(event="finished", round=self.rounds + 1)
 
 class ClientP2PSL(ClientSL):
-    def send_model(self, mbox="server") -> None:
+    def send_model(self, mbox: str | int = "server") -> None:
         self.channel.send(Message(self.model, "client_model", self.index, inmemory=True), mbox)
 
-    def receive_model(self, sender="server") -> None:
+    def receive_model(self, sender: str | int ="server") -> None:
         msg = self.channel.receive(self.index, sender, msg_type="client_model")
         if self.model is None:
             self.model = msg.payload
@@ -98,13 +102,14 @@ class ClientP2PSL(ClientSL):
         msg = self.channel.receive(self.index, "server", msg_type="last_client_index")
         return msg.payload
 
-    def start_round(self, current_round: int, receive_from_server=False) -> Generator:
+    def start_round(self, current_round: int) -> Generator:
         self.n_batches = 0
         self.running_loss = 0.0
         self.local_smashed = None
         self._load_from_cache()
-        sender = "server" if receive_from_server else self.receive_client_info()
-        self.receive_model(sender)
+        sender = self.receive_client_info()
+        if sender is not None:
+            self.receive_model(sender)
         self.model.train()
         self.model.to(self.device)
 
@@ -160,11 +165,21 @@ class ServerP2PSL(ServerSL):
 
         self.last_client_trained_index = None
 
-    def send_last_client_trained_info(self, client_index: int) -> None:
+    def send_last_client_trained_info(self, client_index: int, first_client_first_round=False) -> None:
         self.channel.send(
-            Message(self.last_client_trained_index, "last_client_index", "server", inmemory=True), client_index)
+            Message(self.last_client_trained_index if not first_client_first_round else None, "last_client_index", "server", inmemory=True), client_index)
 
     def end_round(self, client_index):
         self.last_client_trained_index = client_index
         self.model.cpu()
         clear_cuda_cache()
+
+    def evaluate_full_model(self, evaluator: Evaluator, round: int) -> dict[str, float]:
+        # "concateno" le due reti per valutare il modello completo
+        if self.test_set is not None:
+            full_model = torch.nn.Sequential(
+                self.clients[-1].model,
+                self.model
+            )
+            return evaluator.evaluate(round, full_model, self.test_set, loss_fn=None, device=self.device)
+        return {}
