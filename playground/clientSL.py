@@ -61,7 +61,7 @@ class ClientSL(Client):
     def send_smashed_data(self, smashed_data, y) -> None: #centralized
         self.channel.send(Message((smashed_data, y), "client_smashed_data", self.index, inmemory=True),"server")
 
-    def start_training(self, current_round: int) -> Generator:
+    def start_round(self, current_round: int) -> Generator:
         self.n_batches = 0
         self.running_loss = 0.0
         self.local_smashed = None
@@ -74,27 +74,25 @@ class ClientSL(Client):
             self.optimizer, self.scheduler = self._optimizer_cfg(self.model)
 
         self.notify("start_fit", round=current_round, client_id=self.index, model=self.model)
-        return self.forward_to_cut()
+        return self._local_update()
 
-    def forward_to_cut(self):
+    def _local_update(self):
         for X, y in self.train_set:
             X = X.to(self.device)
             self.optimizer.zero_grad()
             self.local_smashed = self.model(X)
             remote_smashed = self.local_smashed.clone().detach().requires_grad_(True)
             self.send_smashed_data(remote_smashed, y)
-            yield remote_smashed, y
 
+            yield #aggiungere commento
 
-    def backward(self):
-        grad_cut, server_loss = self.receive_gradients()
-        self.local_smashed.backward(grad_cut.to(self.local_smashed.device))
-        self._clip_grads(self.model)
-        self.optimizer.step()
-        self.running_loss += server_loss
-        self.n_batches += 1
+            grad_cut, server_loss = self.receive_gradients()
+            self.local_smashed.backward(grad_cut.to(self.local_smashed.device))
+            self._clip_grads(self.model)
+            self.optimizer.step()
+            self.running_loss += server_loss
+            self.n_batches += 1
 
-    def end_epoch(self) -> None:
         if self.scheduler is not None:
             self.scheduler.step()
 
