@@ -1,3 +1,4 @@
+import typing
 from typing import Sequence, Generator
 
 import torch
@@ -35,23 +36,22 @@ class P2PCentralizedSL(CentralizedSL):
                     self.notify(event="start_round", round=rnd + 1,
                                 global_model=torch.nn.Sequential(self.server.client_model, self.server.model))
 
-                    eligible = self.server.get_eligible_clients(eligible_perc)
+                    eligible = typing.cast(Sequence[ClientP2PSL], self.server.get_eligible_clients(eligible_perc)) #eligible is still of type Sequence[Client] but the type checker knows that the return type is Sequence[ClientP2PSL]
+
 
                     self.notify(event="selected_clients", round=rnd + 1, clients=eligible)
 
                     for c, client in enumerate(eligible):
                         if c == 0 and rnd == 0:
-                            self.server.send_client_model(client.index)
+                            self.server.send_client_model(client.index) #in questo caso invia None invece che il modello
                         else:
                             self.server.send_last_client_trained_info(client.index)
                             eligible[c - 1].send_model(client.index) #if c == 0 and rnd != 0 => eligible[0 - 1] == eligible[len(eligible) - 1]
 
-                        forward = client.start_training(rnd + 1, receive_from_server=(c == 0 and rnd == 0))
+                        local_update = client.start_round(rnd + 1, receive_from_server=(c == 0 and rnd == 0))
                         for _ in range(self.hyper_params.client.local_epochs):
-                            for _ in forward:
+                            for _ in local_update:
                                 self.server.train_on_smashed_data(client.index)
-                                client.backward()
-                            client.end_epoch()
                             self.server.end_epoch()
 
                         client.end_round(rnd + 1)
@@ -98,7 +98,7 @@ class ClientP2PSL(ClientSL):
         msg = self.channel.receive(self.index, "server", msg_type="last_client_index")
         return msg.payload
 
-    def start_training(self, current_round: int, receive_from_server=False) -> Generator:
+    def start_round(self, current_round: int, receive_from_server=False) -> Generator:
         self.n_batches = 0
         self.running_loss = 0.0
         self.local_smashed = None
@@ -112,7 +112,7 @@ class ClientP2PSL(ClientSL):
             self.optimizer, self.scheduler = self._optimizer_cfg(self.model)
 
         self.notify("start_fit", round=current_round, client_id=self.index, model=self.model)
-        return self.forward_to_cut()
+        return self._local_update()
 
     def end_round(self, current_round) -> None:
         self._last_round = current_round
