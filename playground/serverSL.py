@@ -104,7 +104,7 @@ class ServerSL(Server):
         if self.scheduler is not None:
             self.scheduler.step()
 
-    def end_round(self, client_index):
+    def end_client_round(self, client_index):
         self.receive_client_model(client_index)
         self.model.cpu()
         clear_cuda_cache()
