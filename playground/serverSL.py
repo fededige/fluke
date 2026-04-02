@@ -109,9 +109,6 @@ class ServerSL(Server):
         self.model.cpu()
         clear_cuda_cache()
 
-    def aggregate(self, eligible, client_models) -> None: #non serve per SL
-        return None
-
     def evaluate_full_model(self, evaluator: Evaluator, round: int) -> dict[str, float]:
         # "concateno" le due reti per valutare il modello completo
         if self.test_set is not None:
