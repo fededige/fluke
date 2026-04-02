@@ -54,22 +54,26 @@ class ServerSplitFedV1(ServerSL):
             clipping=clipping,
             **kwargs,
         )
-        self.round_models = {c.index:deepcopy(model) for c in clients}
+        self.per_client_server_models = {c.index: deepcopy(self.model) for c in self.clients}
+        self.per_client_optimizers = {}
+        self.per_client_schedulers = {}
+        for c in self.clients:
+            opt, sch = self._optimizer_cfg(self.per_client_server_models[c.index])
+            self.per_client_optimizers[c.index] = opt
+            self.per_client_schedulers[c.index] = sch
 
     def train_on_smashed_data(self, client_index: int) -> None:
         smashed, y = self.receive_smashed_data(client_index)
-        round_client_model = self.round_models[client_index]
+        round_client_model = self.per_client_server_models[client_index]
         round_client_model.train()
         round_client_model.to(self.device)
 
-        if self.optimizer is None:
-            self.optimizer, self.scheduler = self._optimizer_cfg(round_client_model)
+        optimizer = self.per_client_optimizers[client_index]
 
         smashed = smashed.to(self.device)
         smashed.requires_grad_(True)
         y = y.to(self.device)
-
-        self.optimizer.zero_grad()
+        optimizer.zero_grad()
 
         server_output = round_client_model(smashed)
         loss = self.hyper_params.loss_fn(server_output, y)
@@ -77,8 +81,8 @@ class ServerSplitFedV1(ServerSL):
 
         grad_cut = smashed.grad.clone().detach().cpu()
 
-        self._clip_grads()
-        self.optimizer.step()
+        self._clip_grads(client_index)
+        optimizer.step()
 
         self.send_gradients(grad_cut, float(loss.item()), client_index)
 
@@ -104,10 +108,26 @@ class ServerSplitFedV1(ServerSL):
         aggregate_models(result_model, client_models, weights, self.hyper_params.lr, inplace=True)
 
     def end_client_round(self, client_index):
-        round_client_model = self.round_models[client_index]
+        round_client_model = self.per_client_server_models[client_index]
         round_client_model.cpu()
         clear_cuda_cache()
 
+    def end_round(self):
+        self.per_client_server_models = {c.index: deepcopy(self.model) for c in self.clients}
+        self.per_client_optimizers = {}
+        self.per_client_schedulers = {}
+        for c in self.clients:
+            opt, sch = self._optimizer_cfg(self.per_client_server_models[c.index])
+            self.per_client_optimizers[c.index] = opt
+            self.per_client_schedulers[c.index] = sch
+
+    def end_epoch(self, client_index = None) -> None:
+        scheduler = self.per_client_schedulers[client_index]
+        scheduler.step()
+
+    def _clip_grads(self, client_index = 0) -> None:
+        if self.hyper_params.clipping > 0:
+            torch.nn.utils.clip_grad_norm_(self.per_client_server_models[client_index].parameters(), self.hyper_params.clipping)
 
 class SplitFedV1(CentralizedSL):
     def __init__(
@@ -135,7 +155,7 @@ class SplitFedV1(CentralizedSL):
         return ServerSplitFedV1
 
     def run(self, n_rounds: int, eligible_perc: float, finalize: bool = True, **kwargs) -> None:
-        self.server = typing.cast(ServerSplitFedV1, self.server) #pycharm segnala che questo è inutile (giustamente) ma se lo togliessi segnalerebbe dei warning in altri punti
+        self.server = typing.cast(ServerSplitFedV1, self.server)
         with FlukeENV().get_live_renderer():
             progress_sl = FlukeENV().get_progress_bar("FL")
             progress_client = FlukeENV().get_progress_bar("clients")
@@ -161,7 +181,7 @@ class SplitFedV1(CentralizedSL):
                         for _ in range(self.hyper_params.client.local_epochs):
                             for _ in local_update:
                                 self.server.train_on_smashed_data(client.index)
-                            self.server.end_epoch()
+                            self.server.end_epoch(client.index)
 
                         client.end_round(rnd + 1)
                         self.server.end_client_round(client.index)
@@ -170,8 +190,8 @@ class SplitFedV1(CentralizedSL):
 
                     client_models = self.server.receive_client_models(eligible, state_dict=False)
                     self.server.aggregate(eligible, client_models, self.server.client_model) #FedAvg over client models
-                    self.server.aggregate(eligible, self.server.round_models.values(), self.server.model) #FedAvg over server models
-
+                    self.server.aggregate(eligible, [self.server.per_client_server_models[c.index] for c in eligible], self.server.model) #FedAvg over server models
+                    self.server.end_round() #testing without this line
                     self._compute_evaluation_full_model(rnd)
                     self.notify(event="end_round", round=rnd + 1)
                     self.rounds += 1
