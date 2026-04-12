@@ -118,8 +118,9 @@ class SplitFedV2(CentralizedSL):
                     self.notify(event="selected_clients", round=rnd + 1, clients=eligible)
 
                     for c, client in enumerate(eligible):
-                        local_update = client.start_round(rnd + 1)
+                        client.start_round(rnd + 1)
                         for _ in range(self.hyper_params.client.local_epochs):
+                            local_update = client.train_epoch()
                             for _ in local_update:
                                 self.server.train_on_smashed_data(client.index)
                             self.server.end_epoch()
