@@ -61,7 +61,7 @@ class ClientSL(Client):
     def send_smashed_data(self, smashed_data, y) -> None: #centralized
         self.channel.send(Message((smashed_data, y), "client_smashed_data", self.index, inmemory=True),"server")
 
-    def start_round(self, current_round: int) -> Generator:
+    def start_round(self, current_round: int):
         self.n_batches = 0
         self.running_loss = 0.0
         self.local_smashed = None
@@ -74,9 +74,9 @@ class ClientSL(Client):
             self.optimizer, self.scheduler = self._optimizer_cfg(self.model)
 
         self.notify("start_fit", round=current_round, client_id=self.index, model=self.model)
-        return self._local_update()
+        # return self._local_update()
 
-    def _local_update(self):
+    def train_epoch(self) -> Generator:
         for X, y in self.train_set:
             X = X.to(self.device)
             self.optimizer.zero_grad()
