@@ -153,8 +153,9 @@ class CentralizedSL(CentralizedFL):
                         # passa al client il modello client-side corrente
                         self.server.send_client_model(client.index)
 
-                        local_update = client.start_round(rnd + 1)
+                        client.start_round(rnd + 1)
                         for _ in range(self.hyper_params.client.local_epochs):
+                            local_update = client.train_epoch()
                             for _ in local_update:
                                 self.server.train_on_smashed_data(client.index)
                             self.server.end_epoch()
