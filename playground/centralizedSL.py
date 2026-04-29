@@ -161,7 +161,7 @@ class CentralizedSL(CentralizedFL):
                             self.server.end_epoch()
 
                         client.end_round(rnd + 1)
-                        self.server.end_round(client.index)
+                        self.server.end_client_round(client.index)
                         progress_client.update(task_id=task_local, completed=c + 1)
                         progress_sl.update(task_id=task_rounds, advance=1)
 

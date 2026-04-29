@@ -104,13 +104,10 @@ class ServerSL(Server):
         if self.scheduler is not None:
             self.scheduler.step()
 
-    def end_round(self, client_index):
+    def end_client_round(self, client_index):
         self.receive_client_model(client_index)
         self.model.cpu()
         clear_cuda_cache()
-
-    def aggregate(self, eligible, client_models) -> None: #non serve per SL
-        return None
 
     def evaluate_full_model(self, evaluator: Evaluator, round: int) -> dict[str, float]:
         # "concateno" le due reti per valutare il modello completo
