@@ -125,6 +125,29 @@ class ServerEPSL(ServerPSL):
             self.send_gradients(full_cut_grads.detach().cpu(), float(loss.item()), client_index)
 
 
+class ClientEPSL(ClientPSL):
+    def train_epoch(self) -> typing.Generator:
+        for X, y in self.train_set:
+            X = X.to(self.device)
+            self.optimizer.zero_grad()
+            self.local_smashed = self.model(X)
+            remote_smashed = self.local_smashed.clone().detach().requires_grad_(True)
+            self.send_smashed_data(remote_smashed, y)
+
+            try:
+                yield  # aggiungere commento
+            finally:
+                grad_cut, server_loss = self.receive_gradients()
+                self.local_smashed.backward(grad_cut.to(self.local_smashed.device))
+                self._clip_grads(self.model)
+                self.optimizer.step()
+                self.running_loss += server_loss
+                self.n_batches += 1
+
+        if self.scheduler is not None:
+            self.scheduler.step()
+
+
 class EPSL(SplitFedV2):
     def __init__(
             self,
@@ -146,7 +169,7 @@ class EPSL(SplitFedV2):
 
 
     def get_client_class(self):
-        return ClientPSL
+        return ClientEPSL
 
     def get_server_class(self):
         return ServerEPSL
@@ -180,11 +203,12 @@ class EPSL(SplitFedV2):
                         client.start_round(rnd + 1)
                         local_updates[client.index] = client.train_epoch()
 
-                    # zip takes n lists and pairs each item in the same position (es. [1, 2, 3], [3, 4, 5], [5, 6, 7] --> [1, 3, 5], [2, 4, 5], [3, 5, 7]);
-                    # local_updates needs to be unpacked because it's a single list (using *)
+                    # local_updates needs to be unpacked (using *) because it's a single list
                     for _ in zip(*local_updates.values()):
                         self.server.server_step([c.index for c in eligible])
 
+                    for gen in local_updates.values():
+                        gen.close()
 
                     for client in eligible:
                         client.end_round(rnd + 1)
