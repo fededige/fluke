@@ -11,6 +11,18 @@ from fluke.utils import clear_cuda_cache
 from playground.psl import ClientPSL, ServerPSL
 from playground.splitfedv2 import SplitFedV2
 
+from datetime import datetime
+
+
+class SimpleLogger:
+    def __init__(self, filepath: str):
+        self.filepath = filepath
+
+    def log(self, message):
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with open(self.filepath, "a") as f:
+            f.write(f"[{timestamp}] {message}\n")
+
 class ServerEPSL(ServerPSL):
     def __init__(
             self,
@@ -39,10 +51,96 @@ class ServerEPSL(ServerPSL):
             **kwargs,
         )
         self.phi = phi
+        self.logger = SimpleLogger("./epsl.log")
 
     def end_client_round(self, client_index=None):
         self.model.cpu()
         clear_cuda_cache()
+
+    # def server_step(self, client_indices: list[int]) -> None:
+    #     self.model.train()
+    #     self.model.to(self.device)
+    #     if self.optimizer is None:
+    #         self.optimizer, self.scheduler = self._optimizer_cfg(self.model)
+    #
+    #     smashed_data = {client_index : self.receive_smashed_data(client_index) for client_index in client_indices}
+    #
+    #     # 3) Server-side Model Forward Propagation
+    #     #Concateno per formare S(t) e y^(t)
+    #     smashed_list = torch.cat([smashed_data[i][0].to(self.device).requires_grad_(True) for i in client_indices])
+    #     y_list = torch.cat([smashed_data[i][1].to(self.device) for i in client_indices])
+    #
+    #     self.optimizer.zero_grad()
+    #
+    #     #Forward propagation
+    #     server_output = self.model(smashed_list)
+    #
+    #     # 4) Gradient Aggregation and Server-side Model Back Propagation:
+    #     loss = self.hyper_params.loss_fn(server_output, y_list)
+    #
+    #
+    #     last_layer_activation_grads = torch.autograd.grad(
+    #         outputs=loss,
+    #         inputs=server_output,
+    #         retain_graph=True,
+    #         create_graph=False,
+    #     )[0]
+    #
+    #
+    #     b = smashed_data[client_indices[0]][0].shape[0]  # per-client batch size
+    #     all_b = []
+    #     for i in client_indices:
+    #         all_b.append(smashed_data[i][0].shape[0])
+    #
+    #     self.logger.log(all_b)
+    #     C = len(client_indices)
+    #     agg_count = math.ceil(self.phi * b)  # ⌈φb⌉
+    #
+    #     # Reshape to (C, b, out_dim) — one chunk per client
+    #     grad_per_client = last_layer_activation_grads.view(C, b, -1)
+    #
+    #     agg_grads = grad_per_client[:, :agg_count, :]  # (C, ⌈φb⌉, out_dim)
+    #     unagg_grads = grad_per_client[:, agg_count:, :]  # (C, b-⌈φb⌉, out_dim)
+    #
+    #     lambdas = torch.tensor(self._get_client_weights([c for c in self.clients if c.index in client_indices])).to(self.device)
+    #
+    #     aggregated = (agg_grads * lambdas.view(C, 1, 1)).sum(dim=0)
+    #
+    #     aggregated_expanded = aggregated.unsqueeze(0).expand(C, -1, -1)
+    #
+    #     modified_grads_per_client = torch.cat([aggregated_expanded, unagg_grads], dim=1)  # (C, b, out_dim)
+    #     modified_last_layer_grads = modified_grads_per_client.reshape(C * b, -1)  # (bC, out_dim)
+    #
+    #     cut_layer_grads = torch.autograd.grad(
+    #         outputs=server_output,
+    #         inputs=smashed_list,
+    #         grad_outputs=modified_last_layer_grads,
+    #         retain_graph=True,
+    #     )[0]
+    #
+    #     server_output.backward(gradient=modified_last_layer_grads)
+    #     self.optimizer.step()
+    #
+    #     # Split cut_layer_grads back per client
+    #     cut_layer_grads_per_client = cut_layer_grads.view(C, b, -1)  # (C, b, q)
+    #
+    #     # Aggregated cut grads are the same for all clients, just take from index 0
+    #     aggregated_cut_grads = cut_layer_grads_per_client[0, :agg_count, :]  # (agg_count, q)
+    #
+    #     # Store the original spatial shape at the top of server_step
+    #     original_smashed_shape = smashed_data[client_indices[0]][0].shape  # (b, 64, 8, 8)
+    #
+    #     # Then when sending, reshape back before sending
+    #     for idx, client_index in enumerate(client_indices):
+    #         unagg_cut_grads = cut_layer_grads_per_client[idx, agg_count:, :]  # (b-agg_count, 4096)
+    #         full_cut_grads = torch.cat([aggregated_cut_grads, unagg_cut_grads], dim=0)  # (b, 4096)
+    #
+    #         # Reshape back to original 4D shape before sending
+    #         full_cut_grads = full_cut_grads.reshape(
+    #             b, *original_smashed_shape[1:]
+    #         )  # (b, 64, 8, 8)
+    #
+    #         self.send_gradients(full_cut_grads.detach().cpu(), float(loss.item()), client_index)
 
     def server_step(self, client_indices: list[int]) -> None:
         self.model.train()
@@ -50,21 +148,22 @@ class ServerEPSL(ServerPSL):
         if self.optimizer is None:
             self.optimizer, self.scheduler = self._optimizer_cfg(self.model)
 
-        smashed_data = {client_index : self.receive_smashed_data(client_index) for client_index in client_indices}
+        smashed_data = {ci: self.receive_smashed_data(ci) for ci in client_indices}
 
-        # 3) Server-side Model Forward Propagation
-        #Concateno per formare S(t) e y^(t)
-        smashed_list = torch.cat([smashed_data[i][0].to(self.device).requires_grad_(True) for i in client_indices])
+        # per-client batch sizes — the key piece of info we need everywhere
+        batch_sizes = [smashed_data[i][0].shape[0] for i in client_indices]
+        C = len(client_indices)
+        # self.logger.log(batch_sizes)
+
+        # Concatenate for forward pass
+        smashed_list = torch.cat(
+            [smashed_data[i][0].to(self.device).requires_grad_(True) for i in client_indices]
+        )
         y_list = torch.cat([smashed_data[i][1].to(self.device) for i in client_indices])
 
         self.optimizer.zero_grad()
-
-        #Forward propagation
         server_output = self.model(smashed_list)
-
-        # 4) Gradient Aggregation and Server-side Model Back Propagation:
         loss = self.hyper_params.loss_fn(server_output, y_list)
-
 
         last_layer_activation_grads = torch.autograd.grad(
             outputs=loss,
@@ -73,25 +172,28 @@ class ServerEPSL(ServerPSL):
             create_graph=False,
         )[0]
 
+        # Split per client using actual sizes (instead of .view(C, b, -1))
+        grad_per_client = list(torch.split(last_layer_activation_grads, batch_sizes, dim=0))
+        # grad_per_client[i] has shape (b_i, out_dim)
 
-        b = smashed_data[client_indices[0]][0].shape[0]  # per-client batch size
-        C = len(client_indices)
-        agg_count = math.ceil(self.phi * b)  # ⌈φb⌉
+        # Aggregation count is bounded by the smallest batch
+        agg_count = math.ceil(self.phi * min(batch_sizes))
 
-        # Reshape to (C, b, out_dim) — one chunk per client
-        grad_per_client = last_layer_activation_grads.view(C, b, -1)
+        # Stack only the aggregated portion (uniform size: agg_count) for the weighted sum
+        agg_stack = torch.stack([g[:agg_count] for g in grad_per_client])  # (C, agg_count, out_dim)
 
-        agg_grads = grad_per_client[:, :agg_count, :]  # (C, ⌈φb⌉, out_dim)
-        unagg_grads = grad_per_client[:, agg_count:, :]  # (C, b-⌈φb⌉, out_dim)
+        lambdas = torch.tensor(
+            self._get_client_weights([c for c in self.clients if c.index in client_indices])
+        ).to(self.device)
 
-        lambdas = torch.tensor(self._get_client_weights([c for c in self.clients if c.index in client_indices])).to(self.device)
+        aggregated = (agg_stack * lambdas.view(C, 1, 1)).sum(dim=0)  # (agg_count, out_dim)
 
-        aggregated = (agg_grads * lambdas.view(C, 1, 1)).sum(dim=0)
-
-        aggregated_expanded = aggregated.unsqueeze(0).expand(C, -1, -1)
-
-        modified_grads_per_client = torch.cat([aggregated_expanded, unagg_grads], dim=1)  # (C, b, out_dim)
-        modified_last_layer_grads = modified_grads_per_client.reshape(C * b, -1)  # (bC, out_dim)
+        # Rebuild modified per-client gradients: shared aggregated head + each client's own tail
+        modified_grad_per_client = [
+            torch.cat([aggregated, grad_per_client[idx][agg_count:]], dim=0)  # (b_idx, out_dim)
+            for idx in range(C)
+        ]
+        modified_last_layer_grads = torch.cat(modified_grad_per_client, dim=0)  # (sum(b_i), out_dim)
 
         cut_layer_grads = torch.autograd.grad(
             outputs=server_output,
@@ -103,27 +205,16 @@ class ServerEPSL(ServerPSL):
         server_output.backward(gradient=modified_last_layer_grads)
         self.optimizer.step()
 
-        # Split cut_layer_grads back per client
-        cut_layer_grads_per_client = cut_layer_grads.view(C, b, -1)  # (C, b, q)
+        # Split cut grads per client — torch.split preserves the spatial dims (64, 8, 8)
+        cut_grads_per_client = list(torch.split(cut_layer_grads, batch_sizes, dim=0))
 
-        # Aggregated cut grads are the same for all clients, just take from index 0
-        aggregated_cut_grads = cut_layer_grads_per_client[0, :agg_count, :]  # (agg_count, q)
+        # Aggregated cut-grad head taken from client 0 (same convention as before)
+        aggregated_cut_head = cut_grads_per_client[0][:agg_count]  # (agg_count, 64, 8, 8)
 
-        # Store the original spatial shape at the top of server_step
-        original_smashed_shape = smashed_data[client_indices[0]][0].shape  # (b, 64, 8, 8)
-
-        # Then when sending, reshape back before sending
         for idx, client_index in enumerate(client_indices):
-            unagg_cut_grads = cut_layer_grads_per_client[idx, agg_count:, :]  # (b-agg_count, 4096)
-            full_cut_grads = torch.cat([aggregated_cut_grads, unagg_cut_grads], dim=0)  # (b, 4096)
-
-            # Reshape back to original 4D shape before sending
-            full_cut_grads = full_cut_grads.reshape(
-                b, *original_smashed_shape[1:]
-            )  # (b, 64, 8, 8)
-
+            unagg_tail = cut_grads_per_client[idx][agg_count:]  # (b_i - agg_count, 64, 8, 8)
+            full_cut_grads = torch.cat([aggregated_cut_head, unagg_tail], 0)  # (b_i, 64, 8, 8)
             self.send_gradients(full_cut_grads.detach().cpu(), float(loss.item()), client_index)
-
 
 class ClientEPSL(ClientPSL):
     def train_epoch(self) -> typing.Generator:
@@ -135,14 +226,20 @@ class ClientEPSL(ClientPSL):
             self.send_smashed_data(remote_smashed, y)
 
             try:
-                yield  # aggiungere commento
-            finally:
-                grad_cut, server_loss = self.receive_gradients()
-                self.local_smashed.backward(grad_cut.to(self.local_smashed.device))
-                self._clip_grads(self.model)
-                self.optimizer.step()
-                self.running_loss += server_loss
-                self.n_batches += 1
+                yield
+            except GeneratorExit:
+                # Generator closed mid-batch (zip stopped because another client
+                # ran out of batches). Server hasn't processed our smashed data
+                # this iteration, so there are no gradients to receive. Bail out.
+                return
+
+            # Normal resumption: server has sent gradients for the batch we just yielded on.
+            grad_cut, server_loss = self.receive_gradients()
+            self.local_smashed.backward(grad_cut.to(self.local_smashed.device))
+            self._clip_grads(self.model)
+            self.optimizer.step()
+            self.running_loss += server_loss
+            self.n_batches += 1
 
         if self.scheduler is not None:
             self.scheduler.step()
@@ -198,17 +295,42 @@ class EPSL(SplitFedV2):
 
                     self.notify(event="selected_clients", round=rnd + 1, clients=eligible)
 
-                    local_updates = {} #list of generators
+                    # local_updates = {} #list of generators
+                    # for client in eligible:
+                    #     client.start_round(rnd + 1)
+                    #     local_updates[client.index] = client.train_epoch()
+                    #
+                    # # local_updates needs to be unpacked (using *) because it's a single list
+                    # for _ in zip(*local_updates.values()):
+                    #     self.server.server_step([c.index for c in eligible])
+                    #
+                    # for gen in local_updates.values():
+                    #     gen.close()
+
+                    active = {}
                     for client in eligible:
                         client.start_round(rnd + 1)
-                        local_updates[client.index] = client.train_epoch()
+                        gen = client.train_epoch()
+                        try:
+                            next(gen)  # prime: sends batch 1, yields
+                            active[client.index] = gen
+                        except StopIteration:
+                            pass  # client had no batches at all
 
-                    # local_updates needs to be unpacked (using *) because it's a single list
-                    for _ in zip(*local_updates.values()):
-                        self.server.server_step([c.index for c in eligible])
+                    while active:
+                        # Server only sees clients that have smashed data in flight right now
+                        self.server.server_step(list(active.keys()))
 
-                    for gen in local_updates.values():
-                        gen.close()
+                        # Advance each live generator: receives prev grad, sends next batch (or finishes)
+                        exhausted = []
+                        for ci, gen in active.items():
+                            try:
+                                next(gen)
+                            except StopIteration:
+                                # Generator exited cleanly — its last grad was received inside this next() call
+                                exhausted.append(ci)
+                        for ci in exhausted:
+                            del active[ci]
 
                     for client in eligible:
                         client.end_round(rnd + 1)
