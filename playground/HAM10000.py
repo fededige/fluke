@@ -54,7 +54,7 @@ class _HAM10000Raw(Dataset):
 
 
 def HAM10000(
-    path: str = r"D:\informatica\anno2025\tesi_magistrale\fluke\playground\data\HAM10000",
+    path: str = r"./data/HAM10000",
     transforms: Optional[callable] = None,
     onthefly_transforms: Optional[callable] = None,
     img_size: int = 64,
@@ -63,9 +63,6 @@ def HAM10000(
 ) -> DataContainer:
     """
     Load the HAM10000 (Human Against Machine with 10000 training images) dataset.
-
-    The dataset must be downloaded manually from Kaggle:
-    https://www.kaggle.com/datasets/kmader/skin-lesion-analysis-toward-melanoma-detection
 
     Expected folder structure::
 
@@ -104,8 +101,7 @@ def HAM10000(
     if not os.path.exists(metadata_path):
         raise FileNotFoundError(
             f"Metadata file not found at {metadata_path}.\n"
-            "Please download HAM10000 from "
-            "https://www.kaggle.com/datasets/kmader/skin-lesion-analysis-toward-melanoma-detection"
+            "Please download HAM10000 "
             f" and place it under '{path}'."
         )
 
