@@ -104,6 +104,29 @@ class CentralizedSL(CentralizedFL):
     def get_server_class(self):
         return ServerSL
 
+    def init_clients(
+        self,
+        clients_tr_data: list[FastDataLoader],
+        clients_te_data: list[FastDataLoader],
+        config: DDict,
+    ) -> Sequence[Client]:
+
+        self._fix_opt_cfg(config.optimizer)
+        optimizer_cfg = OptimizerConfigurator(
+            optimizer_cfg=config.optimizer
+        )
+        clients = [
+            self.get_client_class()(
+                index=i,
+                train_set=clients_tr_data[i],
+                test_set=clients_te_data[i],
+                optimizer_cfg=optimizer_cfg,
+                **config.exclude("optimizer", "batch_size"),
+            )
+            for i in range(self.n_clients)
+        ]
+        return clients
+
     def init_server(self, model:Any, data: FastDataLoader, config:DDict) -> Server:
         if "client" not in model or "server" not in model:
             raise ValueError("Le chiavi richieste sono 'client' e 'server'.")

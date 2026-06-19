@@ -19,7 +19,6 @@ class ClientSL(Client):
         train_set: FastDataLoader | DataLoader,
         test_set: FastDataLoader | DataLoader,
         optimizer_cfg: OptimizerConfigurator,
-        loss_fn: Module,
         local_epochs: int = 1,
         fine_tuning_epochs: int = 0,
         clipping: float = 0,
@@ -31,7 +30,7 @@ class ClientSL(Client):
             train_set=train_set,
             test_set=test_set,
             optimizer_cfg=optimizer_cfg,
-            loss_fn=loss_fn,   # gestire quetsa loss_fn inutile (in centralizedSL)
+            loss_fn=None,   # gestire quetsa loss_fn inutile (in centralizedSL)
             local_epochs=local_epochs,
             fine_tuning_epochs=fine_tuning_epochs,
             clipping=clipping,
@@ -44,11 +43,12 @@ class ClientSL(Client):
 
     def receive_model(self) -> None:
         msg = self.channel.receive(self.index, "server", msg_type="client_model")
-
+        incoming_model, learning_rate = msg.payload
+        self._server_lr = learning_rate
         if self.model is None:
-            self.model = msg.payload
+            self.model = incoming_model
         else:
-            safe_load_state_dict(self.model, msg.payload.state_dict())
+            safe_load_state_dict(self.model, incoming_model.state_dict())
 
     def receive_gradients(self) -> tuple[torch.Tensor, float]:
         msg = self.channel.receive(self.index, "server", msg_type="gradients")
@@ -71,7 +71,10 @@ class ClientSL(Client):
         self.model.to(self.device)
 
         if self.optimizer is None:
-            self.optimizer, self.scheduler = self._optimizer_cfg(self.model)
+            self.optimizer, _ = self._optimizer_cfg(self.model)
+
+        for pg in self.optimizer.param_groups:
+            pg["lr"] = self._server_lr
 
         self.notify("start_fit", round=current_round, client_id=self.index, model=self.model)
         # return self._local_update()
@@ -93,8 +96,8 @@ class ClientSL(Client):
             self.running_loss += server_loss
             self.n_batches += 1
 
-        if self.scheduler is not None:
-            self.scheduler.step()
+        # if self.scheduler is not None:
+        #     self.scheduler.step()
 
     def end_round(self, current_round) -> None:
         self._last_round = current_round

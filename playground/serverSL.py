@@ -50,8 +50,11 @@ class ServerSL(Server):
         )
 
     def send_client_model(self, client_index: int) -> None:
+        if self.optimizer is None:
+            self.optimizer, self.scheduler = self._optimizer_cfg(self.model)
+        current_lr = self.optimizer.param_groups[0]["lr"]
         self.channel.send(
-            Message(self.client_model, "client_model", "server", inmemory=True), client_index)
+            Message((self.client_model, current_lr), "client_model", "server", inmemory=True), client_index)
 
     def receive_client_model(self, client_index: int) -> None: #solo nel caso centralized
         msg = self.channel.receive("server", client_index, msg_type="client_model")
