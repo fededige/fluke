@@ -19,11 +19,12 @@ from playground.serverSL import ServerSL
 class ClientSplitFedV1(ClientSL):
     def receive_model(self) -> None:
         msg = self.channel.receive(self.index, "fed_server", msg_type="client_model")
-
+        incoming_model, lr = msg.payload
+        self._server_lr = lr
         if self.model is None:
-            self.model = msg.payload
+            self.model = incoming_model
         else:
-            safe_load_state_dict(self.model, msg.payload.state_dict())
+            safe_load_state_dict(self.model, incoming_model.state_dict())
 
     def send_model(self) -> None:
         self.channel.send(Message(self.model, "client_model", self.index, inmemory=True),"fed_server")
@@ -54,13 +55,27 @@ class ServerSplitFedV1(ServerSL):
             clipping=clipping,
             **kwargs,
         )
+        # self.per_client_server_models = {c.index: deepcopy(self.model) for c in self.clients}
+        # self.per_client_optimizers = {}
+        # self.per_client_schedulers = {}
+        # for c in self.clients:
+        #     opt, sch = self._optimizer_cfg(self.per_client_server_models[c.index])
+        #     self.per_client_optimizers[c.index] = opt
+        #     self.per_client_schedulers[c.index] = sch
+        self.optimizer, self.scheduler = self._optimizer_cfg(self.model)
+        self.per_client_server_models = {}
+        self.per_client_optimizers = {}
+        self._build_per_client()
+
+    def _build_per_client(self) -> None:
+        lr = self.optimizer.param_groups[0]["lr"]
         self.per_client_server_models = {c.index: deepcopy(self.model) for c in self.clients}
         self.per_client_optimizers = {}
-        self.per_client_schedulers = {}
         for c in self.clients:
-            opt, sch = self._optimizer_cfg(self.per_client_server_models[c.index])
+            opt, _ = self._optimizer_cfg(self.per_client_server_models[c.index])
+            for pg in opt.param_groups:
+                pg["lr"] = lr  # every per-client server opt uses the round LR
             self.per_client_optimizers[c.index] = opt
-            self.per_client_schedulers[c.index] = sch
 
     def train_on_smashed_data(self, client_index: int) -> None:
         smashed, y = self.receive_smashed_data(client_index)
@@ -87,8 +102,9 @@ class ServerSplitFedV1(ServerSL):
         self.send_gradients(grad_cut, float(loss.item()), client_index)
 
     def broadcast_model(self, eligible: Sequence[ClientSplitFedV1]) -> None:
+        lr = self.optimizer.param_groups[0]["lr"]
         self.channel.broadcast(
-            Message(self.client_model, "client_model", "fed_server", inmemory=None), [c.index for c in eligible]
+            Message((self.client_model, lr), "client_model", "fed_server", inmemory=None), [c.index for c in eligible]
         )
 
     def receive_client_models(
@@ -113,17 +129,21 @@ class ServerSplitFedV1(ServerSL):
         clear_cuda_cache()
 
     def end_round(self):
-        self.per_client_server_models = {c.index: deepcopy(self.model) for c in self.clients}
-        self.per_client_optimizers = {}
-        self.per_client_schedulers = {}
-        for c in self.clients:
-            opt, sch = self._optimizer_cfg(self.per_client_server_models[c.index])
-            self.per_client_optimizers[c.index] = opt
-            self.per_client_schedulers[c.index] = sch
+        # self.per_client_server_models = {c.index: deepcopy(self.model) for c in self.clients}
+        # self.per_client_optimizers = {}
+        # self.per_client_schedulers = {}
+        # for c in self.clients:
+        #     opt, sch = self._optimizer_cfg(self.per_client_server_models[c.index])
+        #     self.per_client_optimizers[c.index] = opt
+        #     self.per_client_schedulers[c.index] = sch
+        if self.scheduler is not None:
+            self.scheduler.step()
+        self._build_per_client()
 
     def end_epoch(self, client_index = None) -> None:
-        scheduler = self.per_client_schedulers[client_index]
-        scheduler.step()
+        # scheduler = self.per_client_schedulers[client_index]
+        # scheduler.step()
+        pass
 
     def _clip_grads(self, client_index = 0) -> None:
         if self.hyper_params.clipping > 0:
@@ -182,7 +202,7 @@ class SplitFedV1(CentralizedSL):
                             local_update = client.train_epoch()
                             for _ in local_update:
                                 self.server.train_on_smashed_data(client.index)
-                            self.server.end_epoch(client.index)
+                            # self.server.end_epoch(client.index)
 
                         client.end_round(rnd + 1)
                         self.server.end_client_round(client.index)
@@ -192,7 +212,7 @@ class SplitFedV1(CentralizedSL):
                     client_models = self.server.receive_client_models(eligible, state_dict=False)
                     self.server.aggregate(eligible, client_models, self.server.client_model) #FedAvg over client models
                     self.server.aggregate(eligible, [self.server.per_client_server_models[c.index] for c in eligible], self.server.model) #FedAvg over server models
-                    self.server.end_round() #testing without this line
+                    self.server.end_round()
                     self._compute_evaluation_full_model(rnd)
                     self.notify(event="end_round", round=rnd + 1)
                     self.rounds += 1

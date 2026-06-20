@@ -46,8 +46,12 @@ class ServerSplitFedV2(ServerSL):
         )
 
     def broadcast_model(self, eligible: Sequence[ClientSplitFedV1]) -> None:
+        if self.optimizer is None:
+            self.optimizer, self.scheduler = self._optimizer_cfg(self.model)
+        current_lr = self.optimizer.param_groups[0]["lr"]
         self.channel.broadcast(
-            Message(self.client_model, "client_model", "fed_server", inmemory=None), [c.index for c in eligible]
+            Message((self.client_model, current_lr), "client_model", "fed_server", inmemory=None),
+            [c.index for c in eligible]
         )
 
     def receive_client_models(
@@ -69,6 +73,12 @@ class ServerSplitFedV2(ServerSL):
     def end_client_round(self, client_index):
         self.model.cpu()
         clear_cuda_cache()
+
+    def end_round(self):
+        if self.scheduler is None:
+            _, self.scheduler = self._optimizer_cfg(self.model)
+        self.scheduler.step()
+
 
 class SplitFedV2(CentralizedSL):
     def __init__(
@@ -111,9 +121,11 @@ class SplitFedV2(CentralizedSL):
                     self.notify(event="start_round", round=rnd + 1,
                                 global_model=torch.nn.Sequential(self.server.client_model, self.server.model))
 
-                    eligible = typing.cast(Sequence[ClientSplitFedV1], self.server.get_eligible_clients(eligible_perc)) # eligible is still of type Sequence[Client] but the type checker knows that the return type is Sequence[ClientSplitFedV1]
+                    eligible = typing.cast(Sequence[ClientSplitFedV1], self.server.get_eligible_clients(
+                        eligible_perc))  # eligible is still of type Sequence[Client] but the type checker knows that the return type is Sequence[ClientSplitFedV1]
 
-                    self.server.broadcast_model(eligible) #il fed_server invia il modello client-side a tutti i client eligible (in questo caso server e fed_server sono coincidenti)
+                    self.server.broadcast_model(
+                        eligible)  # il fed_server invia il modello client-side a tutti i client eligible (in questo caso server e fed_server sono coincidenti)
 
                     self.notify(event="selected_clients", round=rnd + 1, clients=eligible)
 
@@ -123,7 +135,7 @@ class SplitFedV2(CentralizedSL):
                             local_update = client.train_epoch()
                             for _ in local_update:
                                 self.server.train_on_smashed_data(client.index)
-                            self.server.end_epoch()
+                            # self.server.end_epoch()
 
                         client.end_round(rnd + 1)
                         self.server.end_client_round(client.index)
@@ -131,8 +143,10 @@ class SplitFedV2(CentralizedSL):
                         progress_sl.update(task_id=task_rounds, advance=1)
 
                     client_models = self.server.receive_client_models(eligible, state_dict=False)
-                    self.server.aggregate(eligible, client_models, self.server.client_model) #FedAvg over client models
+                    self.server.aggregate(eligible, client_models,
+                                          self.server.client_model)  # FedAvg over client models
                     # self.server.aggregate(eligible, [self.server.per_client_server_models[c.index] for c in eligible], self.server.model) #this aggregation is not needed in SFLV2
+                    self.server.end_round()
                     self._compute_evaluation_full_model(rnd)
                     self.notify(event="end_round", round=rnd + 1)
                     self.rounds += 1

@@ -1,10 +1,13 @@
 import typing
 import torch
 
+from typing import Generator
+
 from fluke import FlukeENV
 from fluke.comm import Message
 from fluke.server import EarlyStopping
 from fluke.utils import clear_cuda_cache
+from fluke.utils.model import safe_load_state_dict
 from playground.clientSL import ClientSL
 from playground.serverSL import ServerSL
 from playground.splitfedv2 import SplitFedV2
@@ -25,6 +28,41 @@ class ClientPSL(ClientSL):
 
         self.notify("start_fit", round=current_round, client_id=self.index, model=self.model)
 
+    def receive_model(self) -> None:
+        msg = self.channel.receive(self.index, "server", msg_type="client_model")
+
+        if self.model is None:
+            self.model = msg.payload
+        else:
+            safe_load_state_dict(self.model, msg.payload.state_dict())
+
+    def receive_gradients(self):
+        msg = self.channel.receive(self.index, "server", msg_type="gradients")
+        grad_cut, loss, lr = msg.payload
+        return grad_cut, loss, lr
+
+    def train_epoch(self) -> Generator:
+        for X, y in self.train_set:
+            X = X.to(self.device)
+            self.optimizer.zero_grad()
+            self.local_smashed = self.model(X)
+            remote_smashed = self.local_smashed.clone().detach().requires_grad_(True)
+            self.send_smashed_data(remote_smashed, y)
+
+            yield #aggiungere commento
+
+            grad_cut, server_loss, server_lr  = self.receive_gradients()
+            for pg in self.optimizer.param_groups:
+                pg["lr"] = server_lr
+            self.local_smashed.backward(grad_cut.to(self.local_smashed.device))
+            self._clip_grads(self.model)
+            self.optimizer.step()
+            self.running_loss += server_loss
+            self.n_batches += 1
+
+        # if self.scheduler is not None:
+        #     self.scheduler.step()
+
     def end_round(self, current_round) -> None:
         self._last_round = current_round
 
@@ -44,6 +82,15 @@ class ClientPSL(ClientSL):
 
 class ServerPSL(ServerSL):
 
+    def send_gradients(self, grad_cut, loss, client_index) -> None:
+        if self.optimizer is None:
+            self.optimizer, self.scheduler = self._optimizer_cfg(self.model)
+        current_lr = self.optimizer.param_groups[0]["lr"]
+        self.channel.send(
+            Message((grad_cut, loss, current_lr), "gradients", "server", inmemory=True),
+            client_index,
+        )
+
     def broadcast_model(self, eligible: typing.Sequence[ClientPSL]) -> None:
         self.channel.broadcast(
             Message(self.client_model, "client_model", "server", inmemory=None), [c.index for c in eligible]
@@ -52,6 +99,10 @@ class ServerPSL(ServerSL):
     def end_client_round(self, client_index):
         self.model.cpu()
         clear_cuda_cache()
+
+    def end_round(self) -> None:
+        if self.scheduler is not None:
+            self.scheduler.step()
 
 class PSL(SplitFedV2):
     def get_client_class(self):
@@ -90,7 +141,7 @@ class PSL(SplitFedV2):
                             local_update = client.train_epoch()
                             for _ in local_update:
                                 self.server.train_on_smashed_data(client.index)
-                            self.server.end_epoch()
+                            # self.server.end_epoch()
 
                         client.end_round(rnd + 1)
                         self.server.end_client_round(client.index)
@@ -101,6 +152,7 @@ class PSL(SplitFedV2):
                     random_client = eligible[0]
                     random_client.send_model()
                     self.server.receive_client_model(random_client.index)
+                    self.server.end_round()
 
                     self._compute_evaluation_full_model(rnd)
                     self.notify(event="end_round", round=rnd + 1)
