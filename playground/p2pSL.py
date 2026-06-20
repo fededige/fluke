@@ -103,19 +103,23 @@ class ClientP2PSL(ClientSL):
         msg = self.channel.receive(self.index, "server", msg_type="last_client_index")
         return msg.payload
 
-    def start_round(self, current_round: int) -> Generator:
+    def start_round(self, current_round: int):
         self.n_batches = 0
         self.running_loss = 0.0
         self.local_smashed = None
         self._load_from_cache()
-        sender = self.receive_client_info()
+        sender, server_lr = self.receive_client_info()  # unpack the (sender, lr) tuple
+        self._server_lr = server_lr
         if sender is not None:
             self.receive_model(sender)
         self.model.train()
         self.model.to(self.device)
 
         if self.optimizer is None:
-            self.optimizer, self.scheduler = self._optimizer_cfg(self.model)
+            self.optimizer, _ = self._optimizer_cfg(self.model)
+
+        for pg in self.optimizer.param_groups:  # adopt server LR, EVERY round
+            pg["lr"] = self._server_lr
 
         self.notify("start_fit", round=current_round, client_id=self.index, model=self.model)
 
@@ -166,8 +170,14 @@ class ServerP2PSL(ServerSL):
         self.last_client_trained_index = None
 
     def send_last_client_trained_info(self, client_index: int, first_client_first_round=False) -> None:
+        if self.optimizer is None:  # same lazy-init guard as CentralizedSL
+            self.optimizer, self.scheduler = self._optimizer_cfg(self.model)
+        current_lr = self.optimizer.param_groups[0]["lr"]
+        last_idx = None if first_client_first_round else self.last_client_trained_index
         self.channel.send(
-            Message(self.last_client_trained_index if not first_client_first_round else None, "last_client_index", "server", inmemory=True), client_index)
+            Message((last_idx, current_lr), "last_client_index", "server", inmemory=True),
+            client_index,
+        )
 
     def end_round(self, client_index):
         self.last_client_trained_index = client_index

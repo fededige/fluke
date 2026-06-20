@@ -37,6 +37,7 @@ class ClientSL(Client):
             persistency=persistency,
             **kwargs,
         )
+        self._server_lr = None
         self.n_batches = 0
         self.running_loss = 0.0
         self.local_smashed = None
